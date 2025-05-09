@@ -1,10 +1,11 @@
 use openai_api_rust::{Auth, Message, OpenAI, Role};
 use openai_api_rust::chat::{ChatApi, ChatBody};
 use serde::{Deserialize, Serialize};
+use std::env;
 use crate::Config;
 use crate::shell::Shell;
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum Model {
     #[serde(rename = "gpt-4o")]
     OpenAiGpt4o,
@@ -14,19 +15,22 @@ pub enum Model {
 
     #[serde(rename = "ollama")]
     Ollama(String),
+
+    #[serde(rename = "openrouter")]
+    OpenRouter { model_name: String },
 }
 
 impl Model {
     pub fn llm_get_command(&self, config: &Config, user_prompt: &str) -> Result<Option<String>, Box<dyn std::error::Error>> {
-        let model_name = self.get_model_name();
-        let auth = self.get_auth();
-        let client = OpenAI::new(auth, self.get_openai_endpoint().as_str());
+        let model_name_for_api = self.get_api_model_name();
+        let auth = self.get_auth()?;
+        let client = OpenAI::new(auth, self.get_api_endpoint().as_str());
 
         let shell = Shell::detect();
         let system_prompt = self.get_system_prompt(&shell);
 
         let body = ChatBody {
-            model: model_name,
+            model: model_name_for_api,
             max_tokens: Some(config.max_tokens),
             temperature: Some(0.5),
             top_p: None,
@@ -49,35 +53,41 @@ impl Model {
                 .flatten()
                 .map(|message| message.content.clone())
             ),
-            Err(e) => Err(format!("Error: {:?}", e).into()),
+            Err(e) => Err(format!("API Error for model {:?}: {:?}", self, e).into()),
         }
     }
 
-    fn get_model_name(&self) -> String {
+    fn get_api_model_name(&self) -> String {
         match self {
             Model::OpenAiGpt4o => "gpt-4o".to_string(),
             Model::OpenAiGpt4oMini => "gpt-4o-mini".to_string(),
             Model::Ollama(model_name) => model_name.to_string(),
+            Model::OpenRouter { model_name } => model_name.clone(),
         }
     }
 
-    fn get_openai_endpoint(&self) -> String {
+    fn get_api_endpoint(&self) -> String {
         match self {
-            Model::OpenAiGpt4o => "https://api.openai.com/v1/".to_string(),
-            Model::OpenAiGpt4oMini => "https://api.openai.com/v1/".to_string(),
+            Model::OpenAiGpt4o | Model::OpenAiGpt4oMini => "https://api.openai.com/v1/".to_string(),
             Model::Ollama(_) => "http://localhost:11434/v1/".to_string(),
+            Model::OpenRouter { .. } => "https://openrouter.ai/api/v1".to_string(),
         }
     }
 
-    fn get_auth(&self) -> Auth {
+    fn get_auth(&self) -> Result<Auth, Box<dyn std::error::Error>> {
         match self {
-            Model::OpenAiGpt4o => Auth::from_env().expect("OPENAI_API_KEY environment variable not set"),
-            Model::OpenAiGpt4oMini => Auth::from_env().expect("OPENAI_API_KEY environment variable not set"),
-            Model::Ollama(_) => Auth::new("ollama"),
+            Model::OpenAiGpt4o | Model::OpenAiGpt4oMini => {
+                Ok(Auth::from_env().map_err(|_| "OPENAI_API_KEY environment variable not set or invalid".to_string())?)
+            }
+            Model::Ollama(_) => Ok(Auth::new("ollama")),
+            Model::OpenRouter { .. } => {
+                let api_key = env::var("OPENROUTER_API_KEY")
+                    .map_err(|_| "OPENROUTER_API_KEY environment variable not set".to_string())?;
+                Ok(Auth::new(&api_key))
+            }
         }
     }
 
-    /// Generates the LLM system prompt for the shell.
     fn get_system_prompt(&self, shell: &Shell) -> String {
         let shell_command_type = match shell {
             Shell::Powershell => "Windows PowerShell",
@@ -87,7 +97,7 @@ impl Model {
             Shell::DebianAlmquistShell => "Debian Almquist Shell (dash)",
             Shell::KornShell => "Korn Shell (ksh)",
             Shell::CShell => "C Shell (csh)",
-            Shell::Unknown => "",
+            Shell::Unknown => "a generic Unix-like shell",
         };
 
         format!("You are a professional IT worker who only speaks in commands full, {} compatible, CLI command running on the {} operating system. You\n
@@ -99,6 +109,4 @@ impl Model {
             Assume you are operating in the current directory of the user unless explicitly stated otherwise.
         ", shell_command_type, std::env::consts::OS)
     }
-
-
 }
